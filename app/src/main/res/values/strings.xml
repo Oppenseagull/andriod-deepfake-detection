@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Test9.22</string>
+    <string name="select_video">选择视频</string>
+    <string name="extract_audio">提取音频</string>
+    <string name="please_select_video">请选择一个视频</string>
+    <string name="video_selected">已选择视频: %s</string>
+    <string name="extracting_audio">正在提取音频...</string>
+    <string name="extraction_failed">提取失败: %s</string>
+    <string name="extraction_succeeded">提取成功: %s</string>
+    <string name="extraction_succeeded_toast">提取成功！</string>
+    <string name="audio_extraction_complete">音频提取完成: %s</string>
+    <string name="no_audio_track_found">未找到音频轨道</string>
+    <string name="permission_denied">权限被拒绝</string>
+    <string name="failed_to_delete_old_file">无法删除旧的输出文件</string>
+    <string name="play_audio">播放音频</string>
+    <string name="audio_info">音频信息</string>
+    <string name="preprocess_audio">预处理音频</string>
+    <string name="preprocessing_audio">正在预处理音频...</string>
+    <string name="preprocessing_succeeded">预处理成功: %s</string>
+    <string name="preprocessing_failed">预处理失败: %s</string>
+</resources>
