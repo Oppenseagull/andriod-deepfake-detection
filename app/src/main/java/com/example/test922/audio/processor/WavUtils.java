@@ -24,6 +24,92 @@ public final class WavUtils {
         public long dataSize;
     }
 
+    /**
+     * 读取 16-bit PCM WAV 文件，返回归一化后的 float 数组。
+     *
+     * 功能极其纯粹：
+     * 1. 读取 16-bit PCM WAV 文件
+     * 2. 将 short 类型数据转换为 float
+     * 3. 执行归一化：floatVal = shortVal / 32768.0f
+     *
+     * 不做任何其他处理（不做预加重，不做切片）。
+     *
+     * @param filePath WAV 文件的绝对路径
+     * @return 归一化后的音频数据，范围 [-1.0, 1.0)；失败时返回 null
+     */
+    public static float[] readWavFile(String filePath) {
+        if (filePath == null || filePath.isEmpty()) {
+            Log.e(TAG, "readWavFile: 文件路径为空");
+            return null;
+        }
+
+        File file = new File(filePath);
+        if (!file.exists() || !file.isFile()) {
+            Log.e(TAG, "readWavFile: 文件不存在: " + filePath);
+            return null;
+        }
+
+        // 解析 WAV 头
+        WavInfo info = parse(file);
+        if (!info.valid) {
+            Log.e(TAG, "readWavFile: WAV 头解析失败: " + filePath);
+            return null;
+        }
+
+        // 目前只支持 16-bit PCM
+        if (info.bitsPerSample != 16) {
+            Log.e(TAG, "readWavFile: 不支持的位深度: " + info.bitsPerSample + "，仅支持 16-bit");
+            return null;
+        }
+
+        int bytesPerSample = 2; // 16-bit = 2 bytes
+        int channels = Math.max(1, info.channels);
+        int frameSize = bytesPerSample * channels;
+        long totalFrames = info.dataSize / frameSize;
+
+        if (totalFrames <= 0 || totalFrames > Integer.MAX_VALUE) {
+            Log.e(TAG, "readWavFile: 无效的帧数: " + totalFrames);
+            return null;
+        }
+
+        float[] audioData = new float[(int) totalFrames];
+
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            raf.seek(info.dataOffset);
+
+            byte[] buffer = new byte[4096];
+            int audioIndex = 0;
+
+            while (audioIndex < audioData.length) {
+                int bytesToRead = (int) Math.min(buffer.length, (long)(audioData.length - audioIndex) * frameSize);
+                int bytesRead = raf.read(buffer, 0, bytesToRead);
+                if (bytesRead <= 0) break;
+
+                // 处理读取的字节
+                for (int offset = 0; offset + frameSize <= bytesRead && audioIndex < audioData.length; offset += frameSize) {
+                    // 如果是多声道，取所有声道的平均值
+                    float sampleSum = 0f;
+                    for (int ch = 0; ch < channels; ch++) {
+                        int sampleOffset = offset + ch * bytesPerSample;
+                        // 读取 16-bit little-endian 采样
+                        int lo = buffer[sampleOffset] & 0xFF;
+                        int hi = buffer[sampleOffset + 1];
+                        short sampleValue = (short) ((hi << 8) | lo);
+                        // 归一化到 [-1.0, 1.0)
+                        sampleSum += sampleValue / 32768.0f;
+                    }
+                    audioData[audioIndex++] = sampleSum / channels;
+                }
+            }
+
+            return audioData;
+
+        } catch (IOException e) {
+            Log.e(TAG, "readWavFile: IO 错误", e);
+            return null;
+        }
+    }
+
     public static WavInfo parse(File f) {
         WavInfo info = new WavInfo();
         if (f == null || !f.exists() || f.length() < 44) return info;
@@ -97,4 +183,3 @@ public final class WavUtils {
     private static void writeLE16(byte[] arr,int pos,short v){ arr[pos]=(byte)(v&0xFF); arr[pos+1]=(byte)((v>>>8)&0xFF);}
     private static void writeLE32(byte[] arr,int pos,int v){ arr[pos]=(byte)(v&0xFF); arr[pos+1]=(byte)((v>>>8)&0xFF); arr[pos+2]=(byte)((v>>>16)&0xFF); arr[pos+3]=(byte)((v>>>24)&0xFF);}
 }
-

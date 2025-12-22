@@ -14,35 +14,36 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.example.test922.R;
+import com.example.test922.audio.detector.DeepfakeDetector;
+import com.example.test922.audio.detector.RawNet2Strategy;
 import com.example.test922.audio.processor.AudioExtractionListener;
 import com.example.test922.audio.processor.AudioExtractor;
-import com.example.test922.audio.processor.AudioPreprocessor;
 
 import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class MainActivity extends AppCompatActivity implements AudioExtractionListener, AudioPreprocessor.PreprocessingListener {
+public class MainActivity extends AppCompatActivity implements AudioExtractionListener {
 
     private static final String TAG = "MainActivity";
+    private static final String MODEL_ASSET_PATH = "rawnet2.ptl"; // 模型文件路径
+
     private Button extractAudioButton;
     private Button playAudioButton;
     private Button audioInfoButton;
-    private Button preprocessAudioButton; // New button for preprocessing
+    private Button detectDeepfakeButton; // 改为检测按钮
     private TextView statusTextView;
 
     private Uri videoUri;
     private File extractedAudioFile;
-    private File preprocessedAudioFile; // To store the path of the preprocessed file
 
     private MediaPlayer mediaPlayer;
     private final AudioExtractor audioExtractor = new AudioExtractor();
-    private final AudioPreprocessor audioPreprocessor = new AudioPreprocessor(); // New preprocessor instance
+    private DeepfakeDetector deepfakeDetector; // 使用策略模式的检测器
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     private final ActivityResultLauncher<Intent> selectVideoLauncher = registerForActivityResult(
@@ -56,7 +57,7 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
                         // Disable other buttons until extraction is complete
                         playAudioButton.setEnabled(false);
                         audioInfoButton.setEnabled(false);
-                        preprocessAudioButton.setEnabled(false);
+                        detectDeepfakeButton.setEnabled(false);
                     }
                 }
             });
@@ -70,13 +71,16 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
         extractAudioButton = findViewById(R.id.extract_audio_button);
         playAudioButton = findViewById(R.id.play_audio_button);
         audioInfoButton = findViewById(R.id.audio_info_button);
-        preprocessAudioButton = findViewById(R.id.preprocess_audio_button); // Initialize the new button
+        detectDeepfakeButton = findViewById(R.id.preprocess_audio_button); // 复用原来的按钮
         statusTextView = findViewById(R.id.status_text_view);
 
         extractAudioButton.setEnabled(false);
         playAudioButton.setEnabled(false);
         audioInfoButton.setEnabled(false);
-        preprocessAudioButton.setEnabled(false); // Initially disabled
+        detectDeepfakeButton.setEnabled(false);
+
+        // 初始化 Deepfake 检测器（使用 RawNet2 策略）
+        initializeDetector();
 
         // Simplified video selection - no manual permission checks needed
         selectVideoButton.setOnClickListener(v -> openVideoSelector());
@@ -90,13 +94,10 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
             }
         });
 
-        preprocessAudioButton.setOnClickListener(v -> {
+        detectDeepfakeButton.setOnClickListener(v -> {
             if (extractedAudioFile != null && extractedAudioFile.exists()) {
                 runOnUiThread(() -> statusTextView.setText(R.string.preprocessing_audio));
-                String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
-                String outputFileName = "preprocessed_audio_" + timestamp + ".wav";
-                File outputFile = new File(getExternalFilesDir(null), outputFileName);
-                executor.execute(() -> audioPreprocessor.process(extractedAudioFile, outputFile, this));
+                executor.execute(() -> performDeepfakeDetection(extractedAudioFile));
             } else {
                 Toast.makeText(this, "Extracted audio file not found.", Toast.LENGTH_SHORT).show();
             }
@@ -111,6 +112,51 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
                 startActivity(intent);
             } else {
                 Toast.makeText(this, "Audio file not found.", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    /**
+     * 初始化 Deepfake 检测器
+     */
+    private void initializeDetector() {
+        executor.execute(() -> {
+            deepfakeDetector = new RawNet2Strategy();
+            boolean loaded = deepfakeDetector.loadModel(this, MODEL_ASSET_PATH);
+            runOnUiThread(() -> {
+                if (loaded) {
+                    Log.i(TAG, "Deepfake 检测器初始化成功: " + deepfakeDetector.getName());
+                } else {
+                    Log.w(TAG, "Deepfake 检测器加载失败，检测功能可能不可用");
+                }
+            });
+        });
+    }
+
+    /**
+     * 执行 Deepfake 检测
+     */
+    private void performDeepfakeDetection(File audioFile) {
+        if (deepfakeDetector == null) {
+            runOnUiThread(() -> {
+                statusTextView.setText(getString(R.string.preprocessing_failed, "检测器未初始化"));
+            });
+            return;
+        }
+
+        float fakeProbability = deepfakeDetector.detect(audioFile.getAbsolutePath());
+
+        runOnUiThread(() -> {
+            if (fakeProbability < 0) {
+                statusTextView.setText(getString(R.string.preprocessing_failed, "检测失败"));
+            } else {
+                String resultText = String.format(Locale.US,
+                        "检测完成 [%s]\nFake 概率: %.2f%%\n结论: %s",
+                        deepfakeDetector.getName(),
+                        fakeProbability * 100,
+                        fakeProbability > 0.5 ? "可能是伪造音频" : "可能是真实音频");
+                statusTextView.setText(resultText);
+                Toast.makeText(this, "检测完成!", Toast.LENGTH_SHORT).show();
             }
         });
     }
@@ -180,7 +226,7 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
             Toast.makeText(this, getString(R.string.extraction_succeeded_toast), Toast.LENGTH_SHORT).show();
             playAudioButton.setEnabled(true);
             audioInfoButton.setEnabled(true);
-            preprocessAudioButton.setEnabled(true); // Enable preprocessing button
+            detectDeepfakeButton.setEnabled(true);
         });
     }
 
@@ -189,26 +235,6 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
         runOnUiThread(() -> {
             statusTextView.setText(getString(R.string.extraction_failed, errorMessage));
             Log.e(TAG, "Extraction failed: " + errorMessage);
-        });
-    }
-
-    // --- PreprocessingListener Callbacks ---
-
-    @Override
-    public void onPreprocessingSuccess(File processedFile, List<float[]> frames, int sampleRate) {
-        this.preprocessedAudioFile = processedFile;
-        runOnUiThread(() -> {
-            statusTextView.setText(getString(R.string.preprocessing_succeeded, processedFile.getName()));
-            Toast.makeText(this, "Preprocessing finished!", Toast.LENGTH_SHORT).show();
-            // Optionally, enable a button to play the preprocessed audio
-        });
-    }
-
-    @Override
-    public void onPreprocessingFailed(String errorMessage) {
-        runOnUiThread(() -> {
-            statusTextView.setText(getString(R.string.preprocessing_failed, errorMessage));
-            Log.e(TAG, "Preprocessing failed: " + errorMessage);
         });
     }
 }
