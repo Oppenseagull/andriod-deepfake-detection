@@ -30,6 +30,12 @@ public class AudioExtractor {
 
     private static final String TAG = "AudioExtractor";
 
+    /** RawNet2 模型所需的目标采样率 */
+    public static final int TARGET_SAMPLE_RATE = 16000;
+
+    /** RawNet2 模型所需的目标声道数 */
+    public static final int TARGET_CHANNELS = 1;
+
     public void extractAudio(Context context, Uri videoUri, File extractedAudioFile, AudioExtractionListener listener) {
         listener.onExtractionStarted();
         String inputFilePath = getPathFromUri(context, videoUri);
@@ -63,6 +69,7 @@ public class AudioExtractor {
     }
 
     // 使用 FFmpegKit 解封装音频到 PCM16 WAV（多轨优先匹配中文/主音轨，失败回退）
+    // 修改：添加重采样到 16kHz 单声道
     private boolean extractWithFFmpeg(String inputPath, File outFile) {
         if (inputPath == null) return false;
         // 优先按语言/标题/handler 匹配中文/主音轨
@@ -84,7 +91,11 @@ public class AudioExtractor {
         for (int i = 0; i < selectors.length; i++) {
             safeDelete(outFile);
             String map = selectors[i];
-            String cmd = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath) + " -vn -map " + map + " -acodec pcm_s16le " + escapePath(outFile.getAbsolutePath());
+            // 添加 -ar 16000 -ac 1 进行重采样到 16kHz 单声道
+            String cmd = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath)
+                    + " -vn -map " + map
+                    + " -ar " + TARGET_SAMPLE_RATE + " -ac " + TARGET_CHANNELS
+                    + " -acodec pcm_s16le " + escapePath(outFile.getAbsolutePath());
             Log.d(TAG, "FFmpeg 解封装命令尝试(" + (i+1) + "/" + selectors.length + "): " + cmd);
             FFmpegSession s = FFmpegKit.execute(cmd);
             if (ReturnCode.isSuccess(s.getReturnCode()) && outFile.exists() && WavUtils.verifyRiffWave(outFile) && outFile.length() > 100) {
@@ -95,7 +106,10 @@ public class AudioExtractor {
         }
         // 最终回退：不指定 -map 让 FFmpeg 自选
         safeDelete(outFile);
-        String fallback = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath) + " -vn -acodec pcm_s16le " + escapePath(outFile.getAbsolutePath());
+        // 添加 -ar 16000 -ac 1 进行重采样到 16kHz 单声道
+        String fallback = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath)
+                + " -vn -ar " + TARGET_SAMPLE_RATE + " -ac " + TARGET_CHANNELS
+                + " -acodec pcm_s16le " + escapePath(outFile.getAbsolutePath());
         Log.d(TAG, "FFmpeg 解封装最终回退: " + fallback);
         FFmpegSession s = FFmpegKit.execute(fallback);
         if (ReturnCode.isSuccess(s.getReturnCode()) && outFile.exists() && WavUtils.verifyRiffWave(outFile) && outFile.length() > 100) {
@@ -331,4 +345,111 @@ public class AudioExtractor {
     }
 
     private String safeLower(String s) { return s == null ? "" : s.toLowerCase(Locale.US); }
+
+    /**
+     * 将任意音频文件转换为 16kHz 单声道 16-bit PCM WAV 格式。
+     * 用于直接选取的音频文件在检测前的预处理。
+     *
+     * @param context  上下文
+     * @param inputUri 输入音频文件的 Uri
+     * @param outputFile 输出的 WAV 文件
+     * @param listener 转换结果回调
+     */
+    public void convertTo16kHzMono(Context context, Uri inputUri, File outputFile, AudioExtractionListener listener) {
+        listener.onExtractionStarted();
+
+        String inputPath = getPathFromUri(context, inputUri);
+        if (inputPath == null) {
+            listener.onExtractionFailure("无法获取输入音频文件路径");
+            return;
+        }
+
+        File parent = outputFile.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            listener.onExtractionFailure("无法创建输出目录: " + parent.getAbsolutePath());
+            return;
+        }
+
+        if (outputFile.exists() && !outputFile.delete()) {
+            Log.w(TAG, "无法删除已存在的输出文件：" + outputFile.getAbsolutePath());
+        }
+
+        new Thread(() -> {
+            long t0 = System.currentTimeMillis();
+            Log.d(TAG, "开始音频格式转换: " + inputPath + " -> 16kHz 单声道 WAV");
+
+            boolean success = convertWithFFmpeg(inputPath, outputFile);
+            long dt = System.currentTimeMillis() - t0;
+
+            if (success) {
+                Log.d(TAG, "音频转换成功, 用时=" + dt + "ms 大小=" + outputFile.length());
+                listener.onExtractionSuccess(outputFile);
+            } else {
+                Log.e(TAG, "音频转换失败");
+                listener.onExtractionFailure("音频格式转换失败，请确保文件是有效的音频格式");
+            }
+        }).start();
+    }
+
+    /**
+     * 使用 FFmpeg 将音频转换为 16kHz 单声道 16-bit PCM WAV。
+     *
+     * @param inputPath 输入文件路径
+     * @param outputFile 输出 WAV 文件
+     * @return 转换是否成功
+     */
+    private boolean convertWithFFmpeg(String inputPath, File outputFile) {
+        if (inputPath == null) return false;
+
+        safeDelete(outputFile);
+
+        // FFmpeg 命令：转换为 16kHz 单声道 16-bit PCM WAV
+        String cmd = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath)
+                + " -vn -ar " + TARGET_SAMPLE_RATE + " -ac " + TARGET_CHANNELS
+                + " -acodec pcm_s16le " + escapePath(outputFile.getAbsolutePath());
+
+        Log.d(TAG, "FFmpeg 音频转换命令: " + cmd);
+        FFmpegSession session = FFmpegKit.execute(cmd);
+
+        if (ReturnCode.isSuccess(session.getReturnCode()) && outputFile.exists()
+                && WavUtils.verifyRiffWave(outputFile) && outputFile.length() > 100) {
+            // 验证输出文件的格式
+            WavUtils.WavInfo info = WavUtils.parse(outputFile);
+            if (info.valid) {
+                Log.d(TAG, "转换后 WAV 信息: sampleRate=" + info.sampleRate
+                        + " channels=" + info.channels + " bits=" + info.bitsPerSample);
+            }
+            return true;
+        }
+
+        Log.e(TAG, "FFmpeg 音频转换失败 rc=" + session.getReturnCode()
+                + " 日志:\n" + tail(safeLogs(session)));
+        if (outputFile.exists()) safeDelete(outputFile);
+        return false;
+    }
+
+    /**
+     * 检查音频文件是否已经是 16kHz 单声道 16-bit PCM WAV 格式。
+     *
+     * @param file 要检查的文件
+     * @return 如果格式正确返回 true
+     */
+    public static boolean isCorrectFormat(File file) {
+        if (file == null || !file.exists()) return false;
+
+        WavUtils.WavInfo info = WavUtils.parse(file);
+        if (!info.valid) return false;
+
+        boolean correct = info.sampleRate == TARGET_SAMPLE_RATE
+                && info.channels == TARGET_CHANNELS
+                && info.bitsPerSample == 16;
+
+        if (!correct) {
+            Log.d(TAG, "音频格式不匹配: sampleRate=" + info.sampleRate
+                    + "(需要" + TARGET_SAMPLE_RATE + ") channels=" + info.channels
+                    + "(需要" + TARGET_CHANNELS + ") bits=" + info.bitsPerSample + "(需要16)");
+        }
+
+        return correct;
+    }
 }
