@@ -119,6 +119,10 @@ public final class WavUtils {
             raf.skipBytes(4); raf.readFully(id); if (!"WAVE".equals(new String(id, StandardCharsets.US_ASCII))) return info;
             while (raf.getFilePointer() + 8 <= raf.length()) {
                 raf.readFully(id); int chunkSize = Integer.reverseBytes(raf.readInt()); String cid = new String(id, StandardCharsets.US_ASCII);
+                // 根据 RIFF 标准，Chunk 必须 word-aligned（偶数字节对齐）
+                // 如果 chunkSize 是奇数，文件中会有 1 个 padding byte，但不计入 chunkSize
+                int paddedChunkSize = (chunkSize % 2 == 1) ? chunkSize + 1 : chunkSize;
+
                 if ("fmt ".equals(cid)) {
                     long fmtStart = raf.getFilePointer();
                     raf.readShort(); // formatTag
@@ -126,13 +130,13 @@ public final class WavUtils {
                     int sampleRate = Integer.reverseBytes(raf.readInt());
                     raf.skipBytes(6);
                     int bitsPerSample = Short.toUnsignedInt(Short.reverseBytes(raf.readShort()));
-                    long toSkip = chunkSize - (raf.getFilePointer() - fmtStart); if (toSkip > 0) raf.skipBytes((int) toSkip);
+                    long toSkip = paddedChunkSize - (raf.getFilePointer() - fmtStart); if (toSkip > 0) raf.skipBytes((int) toSkip);
                     info.channels = channels; info.sampleRate = sampleRate; info.bitsPerSample = bitsPerSample;
                 } else if ("data".equals(cid)) {
                     info.dataOffset = raf.getFilePointer(); info.dataSize = Integer.toUnsignedLong(chunkSize);
                     info.valid = info.sampleRate > 0 && info.channels > 0 && info.bitsPerSample > 0; break;
                 } else {
-                    raf.skipBytes(chunkSize);
+                    raf.skipBytes(paddedChunkSize);
                 }
             }
         } catch (IOException e) {

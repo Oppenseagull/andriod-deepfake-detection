@@ -36,38 +36,6 @@ public class AudioExtractor {
     /** RawNet2 模型所需的目标声道数 */
     public static final int TARGET_CHANNELS = 1;
 
-    public void extractAudio(Context context, Uri videoUri, File extractedAudioFile, AudioExtractionListener listener) {
-        listener.onExtractionStarted();
-        String inputFilePath = getPathFromUri(context, videoUri);
-        if (inputFilePath == null) {
-            listener.onExtractionFailure("无法获取输入视频文件路径");
-            return;
-        }
-        File parent = extractedAudioFile.getParentFile();
-        if (parent != null && !parent.exists() && !parent.mkdirs()) {
-            listener.onExtractionFailure("无法创建输出目录: " + parent.getAbsolutePath());
-            return;
-        }
-        if (extractedAudioFile.exists() && !extractedAudioFile.delete()) {
-            Log.w(TAG, "无法删除已存在的输出文件：" + extractedAudioFile.getAbsolutePath());
-        }
-        // 新线程：先尝试 FFmpeg 解封装为 PCM16 WAV；失败再回退 MediaCodec
-        new Thread(() -> {
-            long t0 = System.currentTimeMillis();
-            Log.d(TAG, "开始 FFmpeg 音频抽取（不重采样）");
-            boolean ffOk = extractWithFFmpeg(inputFilePath, extractedAudioFile);
-            long dt = System.currentTimeMillis() - t0;
-            if (ffOk) {
-                Log.d(TAG, "FFmpeg 抽取成功, 用时=" + dt + "ms 大小=" + extractedAudioFile.length() + " 头=" + getFileHeadHex(extractedAudioFile,12));
-                listener.onExtractionSuccess(extractedAudioFile);
-            } else {
-                Log.w(TAG, "FFmpeg 抽取失败, 回退 MediaCodec 解码路径");
-                boolean ok = decodeWithMediaCodecInternal(context, videoUri, extractedAudioFile);
-                if (ok) listener.onExtractionSuccess(extractedAudioFile); else listener.onExtractionFailure("MediaCodec 解码失败");
-            }
-        }).start();
-    }
-
     // 使用 FFmpegKit 解封装音频到 PCM16 WAV（多轨优先匹配中文/主音轨，失败回退）
     // 修改：添加重采样到 16kHz 单声道
     private boolean extractWithFFmpeg(String inputPath, File outFile) {
@@ -121,6 +89,7 @@ public class AudioExtractor {
     }
 
     // MediaCodec 解码为 PCM16 WAV（保留输出格式采样率与声道），仅负责解码不重采样
+    // 注意：此方法输出的 WAV 可能不是 16kHz 单声道，需要后续用 FFmpeg 转换
     private boolean decodeWithMediaCodecInternal(Context context, Uri videoUri, File outFile) {
         MediaExtractor extractor = new MediaExtractor();
         try {
@@ -451,5 +420,71 @@ public class AudioExtractor {
         }
 
         return correct;
+    }
+
+    public void extractAudio(Context context, Uri videoUri, File extractedAudioFile, AudioExtractionListener listener) {
+        listener.onExtractionStarted();
+        String inputFilePath = getPathFromUri(context, videoUri);
+        if (inputFilePath == null) {
+            listener.onExtractionFailure("无法获取输入视频文件路径");
+            return;
+        }
+        File parent = extractedAudioFile.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            listener.onExtractionFailure("无法创建输出目录: " + parent.getAbsolutePath());
+            return;
+        }
+        if (extractedAudioFile.exists() && !extractedAudioFile.delete()) {
+            Log.w(TAG, "无法删除已存在的输出文件：" + extractedAudioFile.getAbsolutePath());
+        }
+        // 新线程：先尝试 FFmpeg 解封装为 PCM16 WAV；失败再回退 MediaCodec
+        new Thread(() -> {
+            long t0 = System.currentTimeMillis();
+            Log.d(TAG, "开始 FFmpeg 音频抽取（重采样到 16kHz 单声道）");
+            boolean ffOk = extractWithFFmpeg(inputFilePath, extractedAudioFile);
+            long dt = System.currentTimeMillis() - t0;
+            if (ffOk) {
+                Log.d(TAG, "FFmpeg 抽取成功, 用时=" + dt + "ms 大小=" + extractedAudioFile.length() + " 头=" + getFileHeadHex(extractedAudioFile,12));
+                // 验证输出格式
+                logWavInfo(extractedAudioFile);
+                listener.onExtractionSuccess(extractedAudioFile);
+            } else {
+                Log.w(TAG, "FFmpeg 抽取失败, 回退 MediaCodec 解码路径");
+                // MediaCodec 解码得到的可能不是 16kHz，需要再用 FFmpeg 转换
+                File tempWav = new File(extractedAudioFile.getParent(), "temp_mediacodec_" + System.currentTimeMillis() + ".wav");
+                boolean decodeOk = decodeWithMediaCodecInternal(context, videoUri, tempWav);
+                if (decodeOk && tempWav.exists()) {
+                    // 用 FFmpeg 转换为 16kHz 单声道
+                    Log.d(TAG, "MediaCodec 解码成功，开始 FFmpeg 重采样到 16kHz 单声道");
+                    boolean convertOk = convertWithFFmpeg(tempWav.getAbsolutePath(), extractedAudioFile);
+                    safeDelete(tempWav);
+                    if (convertOk) {
+                        logWavInfo(extractedAudioFile);
+                        listener.onExtractionSuccess(extractedAudioFile);
+                    } else {
+                        listener.onExtractionFailure("音频重采样失败");
+                    }
+                } else {
+                    safeDelete(tempWav);
+                    listener.onExtractionFailure("MediaCodec 解码失败");
+                }
+            }
+        }).start();
+    }
+
+    /**
+     * 打印 WAV 文件信息用于调试
+     */
+    private void logWavInfo(File wavFile) {
+        if (wavFile == null || !wavFile.exists()) return;
+        WavUtils.WavInfo info = WavUtils.parse(wavFile);
+        if (info.valid) {
+            Log.i(TAG, String.format("WAV 信息: sampleRate=%d, channels=%d, bits=%d, dataSize=%d",
+                    info.sampleRate, info.channels, info.bitsPerSample, info.dataSize));
+            // 检查是否符合模型要求
+            if (info.sampleRate != TARGET_SAMPLE_RATE || info.channels != TARGET_CHANNELS) {
+                Log.w(TAG, "⚠️ 警告：WAV 格式不符合模型要求！需要 " + TARGET_SAMPLE_RATE + "Hz 单声道");
+            }
+        }
     }
 }

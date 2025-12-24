@@ -31,6 +31,24 @@ public class RawNet2Strategy implements DeepfakeDetector {
     /** 目标音频长度：4秒 * 16000Hz = 64000 采样点 */
     private static final int TARGET_LENGTH = 64000;
 
+    /**
+     * ⚠️ 重要配置：根据你的训练代码设置！
+     *
+     * PC端训练时标签定义为：
+     *   - label 0 = Spoof/Fake (伪造)
+     *   - label 1 = Real/Bonafide (真实)
+     * 所以 REAL_CLASS_INDEX = 1
+     */
+    private static final int REAL_CLASS_INDEX = 1;  // PC训练：真实=1, 伪造=0
+
+    /**
+     * ⚠️ 重要配置：模型输出是否已经经过 Softmax？
+     *
+     * 如果模型导出时最后一层是 LogSoftmax 或 Softmax，设为 true
+     * 如果模型输出是原始 Logits，设为 false
+     */
+    private static final boolean OUTPUT_IS_PROBABILITY = true;  // 模型已包含 Softmax，直接使用输出
+
     /** PyTorch 模型 */
     private Module mModule;
 
@@ -70,6 +88,16 @@ public class RawNet2Strategy implements DeepfakeDetector {
             }
             Log.d(TAG, "读取音频成功，原始长度: " + rawAudio.length);
 
+            // 调试：打印音频统计信息
+            float min = Float.MAX_VALUE, max = Float.MIN_VALUE, sum = 0;
+            for (float v : rawAudio) {
+                if (v < min) min = v;
+                if (v > max) max = v;
+                sum += v;
+            }
+            float mean = sum / rawAudio.length;
+            Log.d(TAG, String.format("音频统计: min=%.4f, max=%.4f, mean=%.6f", min, max, mean));
+
             // 2. Pad 或 Trim 到目标长度
             float[] processedAudio = padOrTrim(rawAudio);
             Log.d(TAG, "Pad/Trim 后长度: " + processedAudio.length);
@@ -89,19 +117,28 @@ public class RawNet2Strategy implements DeepfakeDetector {
             }
 
             // 5. 解析输出
-            // 输出 shape 为 [1, 2]，是 Logits
-            // index 0: Fake (伪造) 的 logit
-            // index 1: Real (真实) 的 logit
-            // 返回 Real 的概率
             if (scores.length >= 2) {
-                float[] probs = softmax(scores);
-                float realProbability = probs[1]; // index 1 是 Real
-                Log.d(TAG, "检测完成 - Fake: " + String.format("%.4f", probs[0])
-                        + ", Real: " + String.format("%.4f", probs[1]));
+                float[] probs;
+                if (OUTPUT_IS_PROBABILITY) {
+                    // 模型输出已经是概率，直接使用
+                    probs = scores;
+                    Log.d(TAG, "使用模型原始输出作为概率");
+                } else {
+                    // 模型输出是 Logits，需要 softmax
+                    probs = softmax(scores);
+                    Log.d(TAG, "对 Logits 执行 Softmax");
+                }
+
+                float realProbability = probs[REAL_CLASS_INDEX];
+                int fakeIndex = 1 - REAL_CLASS_INDEX;
+
+                Log.d(TAG, String.format("检测完成 - Real[%d]: %.4f, Fake[%d]: %.4f",
+                        REAL_CLASS_INDEX, probs[REAL_CLASS_INDEX],
+                        fakeIndex, probs[fakeIndex]));
                 return realProbability;
             } else if (scores.length == 1) {
-                // 如果模型只输出一个值，假设是 Real 的 logit，使用 sigmoid
-                float realProbability = sigmoid(scores[0]);
+                // 如果模型只输出一个值，使用 sigmoid
+                float realProbability = OUTPUT_IS_PROBABILITY ? scores[0] : sigmoid(scores[0]);
                 Log.d(TAG, "检测完成 - Real 概率: " + String.format("%.4f", realProbability));
                 return realProbability;
             } else {
