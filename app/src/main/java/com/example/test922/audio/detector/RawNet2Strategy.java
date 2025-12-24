@@ -35,18 +35,18 @@ public class RawNet2Strategy implements DeepfakeDetector {
     private Module mModule;
 
     @Override
-    public boolean loadModel(Context context, String assetPath) {
+    public boolean loadModel(Context context, String assetName) {
         try {
-            // 从 assets 复制模型到缓存目录
-            String modelPath = assetCopy(context, assetPath);
+            // 从 assets 复制模型到私有目录，获取绝对路径
+            String modelPath = assetFilePath(context, assetName);
             if (modelPath == null) {
-                Log.e(TAG, "无法复制模型文件到缓存目录");
+                Log.e(TAG, "无法复制模型文件到私有目录");
                 return false;
             }
 
             // 加载 PyTorch Lite 模型
             mModule = LiteModuleLoader.load(modelPath);
-            Log.i(TAG, "RawNet2 模型加载成功: " + assetPath);
+            Log.i(TAG, "RawNet2 模型加载成功: " + assetName);
             return true;
         } catch (Exception e) {
             Log.e(TAG, "加载模型失败", e);
@@ -68,9 +68,11 @@ public class RawNet2Strategy implements DeepfakeDetector {
                 Log.e(TAG, "读取音频文件失败或文件为空: " + audioFilePath);
                 return -1f;
             }
+            Log.d(TAG, "读取音频成功，原始长度: " + rawAudio.length);
 
             // 2. Pad 或 Trim 到目标长度
             float[] processedAudio = padOrTrim(rawAudio);
+            Log.d(TAG, "Pad/Trim 后长度: " + processedAudio.length);
 
             // 3. 转换为 PyTorch Tensor，Shape: [1, 64000]
             long[] shape = new long[]{1, TARGET_LENGTH};
@@ -81,19 +83,27 @@ public class RawNet2Strategy implements DeepfakeDetector {
             Tensor outputTensor = output.toTensor();
             float[] scores = outputTensor.getDataAsFloatArray();
 
+            Log.d(TAG, "模型输出长度: " + scores.length);
+            for (int i = 0; i < scores.length; i++) {
+                Log.d(TAG, "scores[" + i + "] = " + scores[i]);
+            }
+
             // 5. 解析输出
-            // 假设输出 shape 为 [1, 2]，其中 scores[0] 是 Bonafide 概率，scores[1] 是 Fake 概率
-            // 使用 softmax 转换为概率
+            // 输出 shape 为 [1, 2]，是 Logits
+            // index 0: Fake (伪造) 的 logit
+            // index 1: Real (真实) 的 logit
+            // 返回 Real 的概率
             if (scores.length >= 2) {
                 float[] probs = softmax(scores);
-                float fakeProbability = probs[1]; // 返回 Fake 的概率
-                Log.d(TAG, "检测完成 - Bonafide: " + probs[0] + ", Fake: " + probs[1]);
-                return fakeProbability;
+                float realProbability = probs[1]; // index 1 是 Real
+                Log.d(TAG, "检测完成 - Fake: " + String.format("%.4f", probs[0])
+                        + ", Real: " + String.format("%.4f", probs[1]));
+                return realProbability;
             } else if (scores.length == 1) {
-                // 如果模型只输出一个值，假设是 Fake 的 logit，使用 sigmoid
-                float fakeProbability = sigmoid(scores[0]);
-                Log.d(TAG, "检测完成 - Fake 概率: " + fakeProbability);
-                return fakeProbability;
+                // 如果模型只输出一个值，假设是 Real 的 logit，使用 sigmoid
+                float realProbability = sigmoid(scores[0]);
+                Log.d(TAG, "检测完成 - Real 概率: " + String.format("%.4f", realProbability));
+                return realProbability;
             } else {
                 Log.e(TAG, "模型输出格式不正确，scores 长度: " + scores.length);
                 return -1f;
@@ -113,15 +123,17 @@ public class RawNet2Strategy implements DeepfakeDetector {
     /**
      * 对音频数据进行 Pad 或 Trim 处理，使其长度等于 TARGET_LENGTH。
      *
-     * - 如果长度 < TARGET_LENGTH：执行循环填充（Repeat/Tile）
+     * - 如果长度 < TARGET_LENGTH：执行循环填充（Loop/Tile），不补零
      * - 如果长度 > TARGET_LENGTH：截取前 TARGET_LENGTH 个采样点
-     * - 如果长度 == TARGET_LENGTH：直接返回
+     * - 如果长度 == TARGET_LENGTH：直接返回副本
      *
      * @param rawAudio 原始音频数据
      * @return 处理后长度为 TARGET_LENGTH 的音频数据
      */
     private float[] padOrTrim(float[] rawAudio) {
         if (rawAudio == null || rawAudio.length == 0) {
+            // 边界情况：返回静音数据
+            Log.w(TAG, "padOrTrim: 输入为空，返回静音数据");
             return new float[TARGET_LENGTH];
         }
 
@@ -136,9 +148,10 @@ public class RawNet2Strategy implements DeepfakeDetector {
             // 长度超过目标，截取前 TARGET_LENGTH 个点
             float[] result = new float[TARGET_LENGTH];
             System.arraycopy(rawAudio, 0, result, 0, TARGET_LENGTH);
+            Log.d(TAG, "Trim: " + originalLength + " -> " + TARGET_LENGTH);
             return result;
         } else {
-            // 长度不足，循环填充（Repeat/Tile）
+            // 长度不足，循环填充（Loop/Tile）
             // 例如 [1,2] 填充到 4 变成 [1,2,1,2]
             float[] result = new float[TARGET_LENGTH];
             int pos = 0;
@@ -147,19 +160,23 @@ public class RawNet2Strategy implements DeepfakeDetector {
                 System.arraycopy(rawAudio, 0, result, pos, copyLen);
                 pos += copyLen;
             }
+            Log.d(TAG, "Pad (Loop): " + originalLength + " -> " + TARGET_LENGTH);
             return result;
         }
     }
 
     /**
      * Softmax 函数，将 logits 转换为概率
+     * 使用数值稳定的实现（减去最大值）
      */
     private float[] softmax(float[] logits) {
+        // 找到最大值以保持数值稳定性
         float maxLogit = Float.NEGATIVE_INFINITY;
         for (float logit : logits) {
             if (logit > maxLogit) maxLogit = logit;
         }
 
+        // 计算 exp(logit - max) 并求和
         float sumExp = 0f;
         float[] expValues = new float[logits.length];
         for (int i = 0; i < logits.length; i++) {
@@ -167,6 +184,7 @@ public class RawNet2Strategy implements DeepfakeDetector {
             sumExp += expValues[i];
         }
 
+        // 归一化得到概率
         float[] probs = new float[logits.length];
         for (int i = 0; i < logits.length; i++) {
             probs[i] = expValues[i] / sumExp;
@@ -182,37 +200,52 @@ public class RawNet2Strategy implements DeepfakeDetector {
     }
 
     /**
-     * 从 assets 复制文件到应用缓存目录
+     * 将 assets 中的文件复制到 App 私有目录，并返回绝对路径。
+     * PyTorch 的 LiteModuleLoader.load() 需要绝对文件路径，不能直接读 assets。
+     *
+     * @param context   Android Context
+     * @param assetName assets 中的文件名
+     * @return 复制后的文件绝对路径，失败时返回 null
      */
-    private String assetCopy(Context context, String assetPath) {
-        File cacheFile = new File(context.getCacheDir(), assetPath);
+    private String assetFilePath(Context context, String assetName) {
+        // 使用 getFilesDir() 获取持久化的私有目录
+        File file = new File(context.getFilesDir(), assetName);
 
-        // 如果缓存文件已存在且有效，直接返回
-        if (cacheFile.exists() && cacheFile.length() > 0) {
-            return cacheFile.getAbsolutePath();
+        // 如果文件已存在且大小大于 0，直接返回路径（避免重复复制）
+        if (file.exists() && file.length() > 0) {
+            Log.d(TAG, "模型文件已存在，跳过复制: " + file.getAbsolutePath());
+            return file.getAbsolutePath();
         }
 
         // 确保父目录存在
-        File parentDir = cacheFile.getParentFile();
+        File parentDir = file.getParentFile();
         if (parentDir != null && !parentDir.exists()) {
-            parentDir.mkdirs();
+            boolean created = parentDir.mkdirs();
+            if (!created) {
+                Log.w(TAG, "创建父目录失败: " + parentDir.getAbsolutePath());
+            }
         }
 
-        try (InputStream is = context.getAssets().open(assetPath);
-             FileOutputStream fos = new FileOutputStream(cacheFile)) {
+        // 从 assets 复制到私有目录
+        try (InputStream is = context.getAssets().open(assetName);
+             FileOutputStream fos = new FileOutputStream(file)) {
 
             byte[] buffer = new byte[8192];
             int bytesRead;
+            long totalBytes = 0;
             while ((bytesRead = is.read(buffer)) != -1) {
                 fos.write(buffer, 0, bytesRead);
+                totalBytes += bytesRead;
             }
             fos.flush();
 
-            return cacheFile.getAbsolutePath();
+            Log.i(TAG, "模型文件复制成功: " + file.getAbsolutePath()
+                    + " (" + (totalBytes / 1024) + " KB)");
+            return file.getAbsolutePath();
+
         } catch (IOException e) {
-            Log.e(TAG, "复制 asset 文件失败: " + assetPath, e);
+            Log.e(TAG, "复制 asset 文件失败: " + assetName, e);
             return null;
         }
     }
 }
-

@@ -149,37 +149,145 @@ public final class WavUtils {
         } catch (IOException e) { return false; }
     }
 
-    public static byte[] buildHeader(int dataBytes, int sampleRate, int channels, int bitsPerSample) {
+    /**
+     * 将 PCM 原始数据写入 WAV 文件。
+     *
+     * @param outputFile 输出文件
+     * @param pcmData    PCM 原始字节数据
+     * @param sampleRate 采样率 (如 16000)
+     * @param channels   声道数 (1=单声道, 2=立体声)
+     * @param bitsPerSample 位深度 (通常为 16)
+     * @return 成功返回 true
+     */
+    public static boolean writeWavFile(File outputFile, byte[] pcmData, int sampleRate, int channels, int bitsPerSample) {
+        if (outputFile == null || pcmData == null || pcmData.length == 0) {
+            Log.e(TAG, "writeWavFile: 无效参数");
+            return false;
+        }
+
+        int byteRate = sampleRate * channels * bitsPerSample / 8;
+        int blockAlign = channels * bitsPerSample / 8;
+
+        try (RandomAccessFile raf = new RandomAccessFile(outputFile, "rw")) {
+            // 写入 WAV 头 (44 字节)
+            // RIFF chunk
+            raf.writeBytes("RIFF");
+            raf.writeInt(Integer.reverseBytes(36 + pcmData.length)); // 文件大小 - 8
+            raf.writeBytes("WAVE");
+
+            // fmt sub-chunk
+            raf.writeBytes("fmt ");
+            raf.writeInt(Integer.reverseBytes(16)); // fmt chunk size (PCM = 16)
+            raf.writeShort(Short.reverseBytes((short) 1)); // audio format (PCM = 1)
+            raf.writeShort(Short.reverseBytes((short) channels));
+            raf.writeInt(Integer.reverseBytes(sampleRate));
+            raf.writeInt(Integer.reverseBytes(byteRate));
+            raf.writeShort(Short.reverseBytes((short) blockAlign));
+            raf.writeShort(Short.reverseBytes((short) bitsPerSample));
+
+            // data sub-chunk
+            raf.writeBytes("data");
+            raf.writeInt(Integer.reverseBytes(pcmData.length));
+            raf.write(pcmData);
+
+            Log.i(TAG, "writeWavFile: 成功写入 " + outputFile.getAbsolutePath() + " (" + pcmData.length + " bytes)");
+            return true;
+        } catch (IOException e) {
+            Log.e(TAG, "writeWavFile: IO 错误", e);
+            return false;
+        }
+    }
+
+    /**
+     * 将 short 数组 PCM 数据写入 WAV 文件。
+     */
+    public static boolean writeWavFile(File outputFile, short[] pcmData, int sampleRate, int channels, int bitsPerSample) {
+        if (pcmData == null || pcmData.length == 0) return false;
+        // 将 short[] 转换为 byte[] (little-endian)
+        byte[] byteData = new byte[pcmData.length * 2];
+        for (int i = 0; i < pcmData.length; i++) {
+            byteData[i * 2] = (byte) (pcmData[i] & 0xFF);
+            byteData[i * 2 + 1] = (byte) ((pcmData[i] >> 8) & 0xFF);
+        }
+        return writeWavFile(outputFile, byteData, sampleRate, channels, bitsPerSample);
+    }
+
+    /**
+     * 构建 WAV 文件头（44 字节）
+     *
+     * @param totalPcmBytes PCM 数据的总字节数
+     * @param sampleRate    采样率（如 16000, 44100, 48000）
+     * @param channels      声道数（1=单声道, 2=立体声）
+     * @param bitsPerSample 位深度（通常为 16）
+     * @return 44 字节的 WAV 头
+     */
+    public static byte[] buildHeader(int totalPcmBytes, int sampleRate, int channels, int bitsPerSample) {
+        int totalDataLen = totalPcmBytes + 36;
+        int byteRate = sampleRate * channels * bitsPerSample / 8;
+        int blockAlign = channels * bitsPerSample / 8;
+
         byte[] header = new byte[44];
-        long riffSize = 36L + dataBytes;
-        header[0]='R'; header[1]='I'; header[2]='F'; header[3]='F';
-        writeLE32(header,4,(int)riffSize);
-        header[8]='W'; header[9]='A'; header[10]='V'; header[11]='E';
-        header[12]='f'; header[13]='m'; header[14]='t'; header[15]=' ';
-        writeLE32(header,16,16);
-        writeLE16(header,20,(short)1);
-        writeLE16(header,22,(short)channels);
-        writeLE32(header,24,sampleRate);
-        int byteRate = sampleRate*channels*bitsPerSample/8;
-        writeLE32(header,28,byteRate);
-        writeLE16(header,32,(short)(channels*bitsPerSample/8));
-        writeLE16(header,34,(short)bitsPerSample);
-        header[36]='d'; header[37]='a'; header[38]='t'; header[39]='a';
-        writeLE32(header,40,dataBytes);
+
+        // RIFF chunk descriptor
+        header[0] = 'R';
+        header[1] = 'I';
+        header[2] = 'F';
+        header[3] = 'F';
+        // Chunk size (file size - 8)
+        header[4] = (byte) (totalDataLen & 0xff);
+        header[5] = (byte) ((totalDataLen >> 8) & 0xff);
+        header[6] = (byte) ((totalDataLen >> 16) & 0xff);
+        header[7] = (byte) ((totalDataLen >> 24) & 0xff);
+        // Format
+        header[8] = 'W';
+        header[9] = 'A';
+        header[10] = 'V';
+        header[11] = 'E';
+
+        // fmt sub-chunk
+        header[12] = 'f';
+        header[13] = 'm';
+        header[14] = 't';
+        header[15] = ' ';
+        // Subchunk1 size (16 for PCM)
+        header[16] = 16;
+        header[17] = 0;
+        header[18] = 0;
+        header[19] = 0;
+        // Audio format (1 = PCM)
+        header[20] = 1;
+        header[21] = 0;
+        // Number of channels
+        header[22] = (byte) channels;
+        header[23] = 0;
+        // Sample rate
+        header[24] = (byte) (sampleRate & 0xff);
+        header[25] = (byte) ((sampleRate >> 8) & 0xff);
+        header[26] = (byte) ((sampleRate >> 16) & 0xff);
+        header[27] = (byte) ((sampleRate >> 24) & 0xff);
+        // Byte rate
+        header[28] = (byte) (byteRate & 0xff);
+        header[29] = (byte) ((byteRate >> 8) & 0xff);
+        header[30] = (byte) ((byteRate >> 16) & 0xff);
+        header[31] = (byte) ((byteRate >> 24) & 0xff);
+        // Block align
+        header[32] = (byte) blockAlign;
+        header[33] = 0;
+        // Bits per sample
+        header[34] = (byte) bitsPerSample;
+        header[35] = 0;
+
+        // data sub-chunk
+        header[36] = 'd';
+        header[37] = 'a';
+        header[38] = 't';
+        header[39] = 'a';
+        // Subchunk2 size (PCM data size)
+        header[40] = (byte) (totalPcmBytes & 0xff);
+        header[41] = (byte) ((totalPcmBytes >> 8) & 0xff);
+        header[42] = (byte) ((totalPcmBytes >> 16) & 0xff);
+        header[43] = (byte) ((totalPcmBytes >> 24) & 0xff);
+
         return header;
     }
-
-    public static boolean rewriteMinimal(File f, int sampleRate, int channels, int bitsPerSample) {
-        if (f==null||!f.exists()) return false;
-        long dataBytes = f.length()-44; if (dataBytes<0) dataBytes=0;
-        try (RandomAccessFile raf = new RandomAccessFile(f, "rw")) {
-            byte[] header = buildHeader((int)dataBytes, sampleRate, channels, bitsPerSample);
-            raf.seek(0); raf.write(header);
-            try { raf.getFD().sync(); } catch (IOException ignore) {}
-            return verifyRiffWave(f);
-        } catch (IOException e) { Log.e(TAG, "rewriteMinimal IO失败", e); return false; }
-    }
-
-    private static void writeLE16(byte[] arr,int pos,short v){ arr[pos]=(byte)(v&0xFF); arr[pos+1]=(byte)((v>>>8)&0xFF);}
-    private static void writeLE32(byte[] arr,int pos,int v){ arr[pos]=(byte)(v&0xFF); arr[pos+1]=(byte)((v>>>8)&0xFF); arr[pos+2]=(byte)((v>>>16)&0xFF); arr[pos+3]=(byte)((v>>>24)&0xFF);}
 }
