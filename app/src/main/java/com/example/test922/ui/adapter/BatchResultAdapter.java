@@ -61,6 +61,13 @@ public class BatchResultAdapter extends RecyclerView.Adapter<BatchResultAdapter.
     }
 
     /**
+     * 获取所有项目
+     */
+    public List<BatchResultItem> getItems() {
+        return items;
+    }
+
+    /**
      * ViewHolder 内部类
      */
     public static class ViewHolder extends RecyclerView.ViewHolder {
@@ -74,3 +81,4 @@ public class BatchResultAdapter extends RecyclerView.Adapter<BatchResultAdapter.
         }
     }
 }
+

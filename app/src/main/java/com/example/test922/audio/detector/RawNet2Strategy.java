@@ -80,23 +80,46 @@ public class RawNet2Strategy implements DeepfakeDetector {
         }
 
         try {
+            Log.d(TAG, "========== 开始检测 ==========");
+            Log.d(TAG, "音频文件路径: " + audioFilePath);
+
+            // 打印文件信息
+            java.io.File audioFile = new java.io.File(audioFilePath);
+            Log.d(TAG, "文件大小: " + audioFile.length() + " bytes");
+
             // 1. 读取 WAV 文件，得到归一化后的 float 数组
             float[] rawAudio = WavUtils.readWavFile(audioFilePath);
             if (rawAudio == null || rawAudio.length == 0) {
                 Log.e(TAG, "读取音频文件失败或文件为空: " + audioFilePath);
                 return -1f;
             }
-            Log.d(TAG, "读取音频成功，原始长度: " + rawAudio.length);
+            Log.d(TAG, "读取音频成功，原始长度: " + rawAudio.length + " 采样点 (" +
+                    String.format("%.2f", rawAudio.length / 16000.0) + " 秒)");
 
             // 调试：打印音频统计信息
             float min = Float.MAX_VALUE, max = Float.MIN_VALUE, sum = 0;
+            float sumSquare = 0;
+            int zeroCount = 0;
             for (float v : rawAudio) {
                 if (v < min) min = v;
                 if (v > max) max = v;
                 sum += v;
+                sumSquare += v * v;
+                if (Math.abs(v) < 0.001f) zeroCount++;
             }
             float mean = sum / rawAudio.length;
-            Log.d(TAG, String.format("音频统计: min=%.4f, max=%.4f, mean=%.6f", min, max, mean));
+            float rms = (float) Math.sqrt(sumSquare / rawAudio.length);
+            float zeroRatio = zeroCount * 100.0f / rawAudio.length;
+
+            Log.d(TAG, String.format("音频统计: min=%.4f, max=%.4f, mean=%.6f, RMS=%.4f", min, max, mean, rms));
+            Log.d(TAG, String.format("静音比例: %.1f%% (|v|<0.001 的采样点占比)", zeroRatio));
+
+            // 打印前20个采样点
+            StringBuilder sb = new StringBuilder("前20个采样点: ");
+            for (int i = 0; i < Math.min(20, rawAudio.length); i++) {
+                sb.append(String.format("%.4f ", rawAudio[i]));
+            }
+            Log.d(TAG, sb.toString());
 
             // 2. Pad 或 Trim 到目标长度
             float[] processedAudio = padOrTrim(rawAudio);
@@ -120,11 +143,9 @@ public class RawNet2Strategy implements DeepfakeDetector {
             if (scores.length >= 2) {
                 float[] probs;
                 if (OUTPUT_IS_PROBABILITY) {
-                    // 模型输出已经是概率，直接使用
                     probs = scores;
                     Log.d(TAG, "使用模型原始输出作为概率");
                 } else {
-                    // 模型输出是 Logits，需要 softmax
                     probs = softmax(scores);
                     Log.d(TAG, "对 Logits 执行 Softmax");
                 }
@@ -135,11 +156,12 @@ public class RawNet2Strategy implements DeepfakeDetector {
                 Log.d(TAG, String.format("检测完成 - Real[%d]: %.4f, Fake[%d]: %.4f",
                         REAL_CLASS_INDEX, probs[REAL_CLASS_INDEX],
                         fakeIndex, probs[fakeIndex]));
+                Log.d(TAG, "========== 检测结束 ==========");
                 return realProbability;
             } else if (scores.length == 1) {
-                // 如果模型只输出一个值，使用 sigmoid
                 float realProbability = OUTPUT_IS_PROBABILITY ? scores[0] : sigmoid(scores[0]);
                 Log.d(TAG, "检测完成 - Real 概率: " + String.format("%.4f", realProbability));
+                Log.d(TAG, "========== 检测结束 ==========");
                 return realProbability;
             } else {
                 Log.e(TAG, "模型输出格式不正确，scores 长度: " + scores.length);

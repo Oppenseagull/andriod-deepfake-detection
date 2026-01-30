@@ -1,19 +1,25 @@
 package com.example.test922.ui.adapter;
 
+import android.graphics.Color;
+
+import java.util.Locale;
+
 /**
  * 批量检测结果数据模型
  */
 public class BatchResultItem {
-    private String fileName;
-    private String filePath;
+    private final String fileName;
+    private final String filePath;
     private float realProbability;  // -1 表示检测中，-2 表示失败
     private boolean isProcessing;
+    private long detectionTimeMs;
 
     public BatchResultItem(String fileName, String filePath) {
         this.fileName = fileName;
         this.filePath = filePath;
         this.realProbability = -1f;
         this.isProcessing = true;
+        this.detectionTimeMs = 0;
     }
 
     public String getFileName() {
@@ -33,12 +39,14 @@ public class BatchResultItem {
         this.isProcessing = false;
     }
 
-    public boolean isProcessing() {
-        return isProcessing;
+    public void setResult(float realProbability, long detectionTimeMs) {
+        this.realProbability = realProbability;
+        this.detectionTimeMs = detectionTimeMs;
+        this.isProcessing = false;
     }
 
-    public void setProcessing(boolean processing) {
-        isProcessing = processing;
+    public boolean isProcessing() {
+        return isProcessing;
     }
 
     public void setFailed() {
@@ -51,18 +59,19 @@ public class BatchResultItem {
     }
 
     /**
-     * 获取显示用的结果文本
+     * 获取结果显示文本
      */
     public String getResultText() {
         if (isProcessing) {
-            return "⏳ 检测中...";
+            return "检测中...";
         } else if (isFailed()) {
-            return "❌ 失败";
+            return "检测失败";
         } else {
-            if (realProbability > 0.5f) {
-                return String.format("✅ 真实 %.0f%%", realProbability * 100);
+            float realPercent = realProbability * 100;
+            if (realProbability > 0.5) {
+                return String.format(Locale.US, "✅ 真实 %.1f%% (%dms)", realPercent, detectionTimeMs);
             } else {
-                return String.format("⚠️ 伪造 %.0f%%", (1 - realProbability) * 100);
+                return String.format(Locale.US, "⚠️ 伪造 %.1f%% (%dms)", 100 - realPercent, detectionTimeMs);
             }
         }
     }
@@ -72,14 +81,13 @@ public class BatchResultItem {
      */
     public int getResultColor() {
         if (isProcessing) {
-            return 0xFF888888; // 灰色
+            return Color.GRAY;
         } else if (isFailed()) {
-            return 0xFFFF0000; // 红色
-        } else if (realProbability > 0.5f) {
-            return 0xFF4CAF50; // 绿色
+            return Color.RED;
+        } else if (realProbability > 0.5) {
+            return Color.parseColor("#4CAF50"); // 绿色
         } else {
-            return 0xFFFF9800; // 橙色
+            return Color.parseColor("#FF9800"); // 橙色
         }
     }
 }
-

@@ -63,7 +63,7 @@
             android:textSize="12sp"/>
 
         <Button
-            android:id="@+id/btn_batch_select"
+            android:id="@+id/btn_batch_folder"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
@@ -166,24 +166,5 @@
         android:padding="8dp"
         android:text="@string/please_select_video"
         android:textAlignment="center"/>
-
-    <!-- 批量检测结果列表 -->
-    <TextView
-        android:id="@+id/batch_result_title"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="批量检测结果："
-        android:textSize="16sp"
-        android:textStyle="bold"
-        android:visibility="gone"/>
-
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/batch_result_recycler"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:layout_marginTop="8dp"
-        android:visibility="gone"/>
 
 </LinearLayout>

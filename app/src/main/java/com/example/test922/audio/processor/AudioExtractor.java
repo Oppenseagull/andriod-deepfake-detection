@@ -40,7 +40,8 @@ public class AudioExtractor {
     // 修改：添加重采样到 16kHz 单声道
     private boolean extractWithFFmpeg(String inputPath, File outFile) {
         if (inputPath == null) return false;
-        // 优先按语言/标题/handler 匹配中文/主音轨
+
+        // 第一步：确定使用哪个音轨映射（只测试映射是否有效，不关心滤镜）
         String[] selectors = new String[]{
                 "0:a:m:language:chi",
                 "0:a:m:language:zho",
@@ -54,36 +55,56 @@ public class AudioExtractor {
                 "0:a:m:title:普通话",
                 "0:a:m:handler_name:中文",
                 "0:a:m:handler_name:main",
-                "0:a:0" // 回退首轨
+                "0:a:0", // 回退首轨
+                null     // 最终回退：不指定 -map
         };
-        for (int i = 0; i < selectors.length; i++) {
+
+        String workingMap = null;
+
+        // 快速测试哪个映射有效（使用简单命令）
+        for (String map : selectors) {
             safeDelete(outFile);
-            String map = selectors[i];
-            // 添加 -ar 16000 -ac 1 进行重采样到 16kHz 单声道
-            String cmd = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath)
-                    + " -vn -map " + map
+            String mapPart = (map != null) ? " -map " + map : "";
+            String testCmd = "-y -hide_banner -nostdin -loglevel error -i " + escapePath(inputPath)
+                    + " -vn" + mapPart
                     + " -ar " + TARGET_SAMPLE_RATE + " -ac " + TARGET_CHANNELS
-                    + " -acodec pcm_s16le " + escapePath(outFile.getAbsolutePath());
-            Log.d(TAG, "FFmpeg 解封装命令尝试(" + (i+1) + "/" + selectors.length + "): " + cmd);
-            FFmpegSession s = FFmpegKit.execute(cmd);
-            if (ReturnCode.isSuccess(s.getReturnCode()) && outFile.exists() && WavUtils.verifyRiffWave(outFile) && outFile.length() > 100) {
-                Log.d(TAG, "FFmpeg 使用映射成功: -map " + map);
-                return true;
+                    + " -acodec pcm_s16le -f wav " + escapePath(outFile.getAbsolutePath());
+
+            FFmpegSession s = FFmpegKit.execute(testCmd);
+            if (ReturnCode.isSuccess(s.getReturnCode()) && outFile.exists() && outFile.length() > 100) {
+                workingMap = map;
+                Log.d(TAG, "找到有效的音轨映射: " + (map != null ? map : "(默认)"));
+                break;
             }
-            Log.w(TAG, "FFmpeg -map 失败 rc=" + s.getReturnCode() + " 映射=" + map + " 尾日志:\n" + tail(safeLogs(s)));
         }
-        // 最终回退：不指定 -map 让 FFmpeg 自选
+
+        if (workingMap == null && (outFile == null || !outFile.exists() || outFile.length() <= 100)) {
+            Log.e(TAG, "无法找到有效的音轨映射");
+            return false;
+        }
+
+        // 第二步：使用确定的映射进行最终转换
+        // 注意：暂时不使用 loudnorm，因为实时录音也没有用，保持一致性
+        // 如果需要 loudnorm，可以取消下面的注释
         safeDelete(outFile);
-        // 添加 -ar 16000 -ac 1 进行重采样到 16kHz 单声道
-        String fallback = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath)
-                + " -vn -ar " + TARGET_SAMPLE_RATE + " -ac " + TARGET_CHANNELS
-                + " -acodec pcm_s16le " + escapePath(outFile.getAbsolutePath());
-        Log.d(TAG, "FFmpeg 解封装最终回退: " + fallback);
-        FFmpegSession s = FFmpegKit.execute(fallback);
-        if (ReturnCode.isSuccess(s.getReturnCode()) && outFile.exists() && WavUtils.verifyRiffWave(outFile) && outFile.length() > 100) {
+        String mapPart = (workingMap != null) ? " -map " + workingMap : "";
+
+        // 不使用滤镜的版本（与实时录音保持一致）
+        String cmd = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath)
+                + " -vn" + mapPart
+                + " -ar " + TARGET_SAMPLE_RATE + " -ac " + TARGET_CHANNELS
+                + " -acodec pcm_s16le -f wav " + escapePath(outFile.getAbsolutePath());
+
+        Log.d(TAG, "FFmpeg 提取命令（无滤镜，与实时录音一致）: " + cmd);
+        FFmpegSession s = FFmpegKit.execute(cmd);
+
+        if (ReturnCode.isSuccess(s.getReturnCode()) && outFile.exists()
+                && WavUtils.verifyRiffWave(outFile) && outFile.length() > 100) {
+            Log.d(TAG, "FFmpeg 提取成功");
             return true;
         }
-        Log.w(TAG, "FFmpeg 解封装失败 rc=" + s.getReturnCode() + " 输出存在?=" + outFile.exists() + " 尾日志:\n" + tail(safeLogs(s)));
+
+        Log.e(TAG, "FFmpeg 提取失败 rc=" + s.getReturnCode() + " 日志:\n" + tail(safeLogs(s)));
         if (outFile.exists()) safeDelete(outFile);
         return false;
     }
@@ -375,7 +396,7 @@ public class AudioExtractor {
         // FFmpeg 命令：转换为 16kHz 单声道 16-bit PCM WAV
         String cmd = "-y -hide_banner -nostdin -loglevel info -i " + escapePath(inputPath)
                 + " -vn -ar " + TARGET_SAMPLE_RATE + " -ac " + TARGET_CHANNELS
-                + " -acodec pcm_s16le " + escapePath(outputFile.getAbsolutePath());
+                + " -acodec pcm_s16le -f wav " + escapePath(outputFile.getAbsolutePath());
 
         Log.d(TAG, "FFmpeg 音频转换命令: " + cmd);
         FFmpegSession session = FFmpegKit.execute(cmd);

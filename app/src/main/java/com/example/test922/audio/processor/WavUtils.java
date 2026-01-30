@@ -115,27 +115,62 @@ public final class WavUtils {
         if (f == null || !f.exists() || f.length() < 44) return info;
         try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
             byte[] id = new byte[4];
-            raf.readFully(id); if (!"RIFF".equals(new String(id, StandardCharsets.US_ASCII))) return info;
-            raf.skipBytes(4); raf.readFully(id); if (!"WAVE".equals(new String(id, StandardCharsets.US_ASCII))) return info;
+            raf.readFully(id);
+            String riffStr = new String(id, StandardCharsets.US_ASCII);
+            if (!"RIFF".equals(riffStr)) {
+                Log.e(TAG, "parse: 不是 RIFF 文件, 头部=" + riffStr);
+                return info;
+            }
+
+            int fileSize = Integer.reverseBytes(raf.readInt());
+            raf.readFully(id);
+            String waveStr = new String(id, StandardCharsets.US_ASCII);
+            if (!"WAVE".equals(waveStr)) {
+                Log.e(TAG, "parse: 不是 WAVE 格式, 格式=" + waveStr);
+                return info;
+            }
+
+            Log.d(TAG, "parse: 文件=" + f.getName() + " 实际大小=" + f.length() + " RIFF声明大小=" + (fileSize + 8));
+
             while (raf.getFilePointer() + 8 <= raf.length()) {
-                raf.readFully(id); int chunkSize = Integer.reverseBytes(raf.readInt()); String cid = new String(id, StandardCharsets.US_ASCII);
+                long chunkStartPos = raf.getFilePointer();
+                raf.readFully(id);
+                int chunkSize = Integer.reverseBytes(raf.readInt());
+                String cid = new String(id, StandardCharsets.US_ASCII);
+
                 // 根据 RIFF 标准，Chunk 必须 word-aligned（偶数字节对齐）
-                // 如果 chunkSize 是奇数，文件中会有 1 个 padding byte，但不计入 chunkSize
                 int paddedChunkSize = (chunkSize % 2 == 1) ? chunkSize + 1 : chunkSize;
+
+                Log.d(TAG, "parse: 发现 Chunk '" + cid + "' 位置=" + chunkStartPos + " 大小=" + chunkSize + " (padded=" + paddedChunkSize + ")");
 
                 if ("fmt ".equals(cid)) {
                     long fmtStart = raf.getFilePointer();
-                    raf.readShort(); // formatTag
+                    short formatTag = Short.reverseBytes(raf.readShort());
                     int channels = Short.toUnsignedInt(Short.reverseBytes(raf.readShort()));
                     int sampleRate = Integer.reverseBytes(raf.readInt());
-                    raf.skipBytes(6);
+                    int byteRate = Integer.reverseBytes(raf.readInt());
+                    short blockAlign = Short.reverseBytes(raf.readShort());
                     int bitsPerSample = Short.toUnsignedInt(Short.reverseBytes(raf.readShort()));
-                    long toSkip = paddedChunkSize - (raf.getFilePointer() - fmtStart); if (toSkip > 0) raf.skipBytes((int) toSkip);
-                    info.channels = channels; info.sampleRate = sampleRate; info.bitsPerSample = bitsPerSample;
+
+                    Log.d(TAG, "parse: fmt 信息 - formatTag=" + formatTag + " channels=" + channels +
+                            " sampleRate=" + sampleRate + " byteRate=" + byteRate +
+                            " blockAlign=" + blockAlign + " bitsPerSample=" + bitsPerSample);
+
+                    long toSkip = paddedChunkSize - (raf.getFilePointer() - fmtStart);
+                    if (toSkip > 0) raf.skipBytes((int) toSkip);
+                    info.channels = channels;
+                    info.sampleRate = sampleRate;
+                    info.bitsPerSample = bitsPerSample;
                 } else if ("data".equals(cid)) {
-                    info.dataOffset = raf.getFilePointer(); info.dataSize = Integer.toUnsignedLong(chunkSize);
-                    info.valid = info.sampleRate > 0 && info.channels > 0 && info.bitsPerSample > 0; break;
+                    info.dataOffset = raf.getFilePointer();
+                    info.dataSize = Integer.toUnsignedLong(chunkSize);
+                    info.valid = info.sampleRate > 0 && info.channels > 0 && info.bitsPerSample > 0;
+
+                    Log.d(TAG, "parse: data 块 - offset=" + info.dataOffset + " size=" + info.dataSize +
+                            " 预计采样点=" + (info.dataSize / (info.bitsPerSample / 8) / info.channels));
+                    break;
                 } else {
+                    Log.d(TAG, "parse: 跳过未知 Chunk '" + cid + "'");
                     raf.skipBytes(paddedChunkSize);
                 }
             }

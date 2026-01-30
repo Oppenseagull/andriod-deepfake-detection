@@ -1,7 +1,6 @@
 package com.example.test922.ui;
 
 import android.Manifest;
-import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -11,6 +10,7 @@ import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.View;
@@ -26,8 +26,6 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
-import androidx.recyclerview.widget.LinearLayoutManager;
-import androidx.recyclerview.widget.RecyclerView;
 
 import com.arthenica.ffmpegkit.FFmpegKit;
 import com.arthenica.ffmpegkit.FFmpegSession;
@@ -37,9 +35,6 @@ import com.example.test922.audio.detector.DeepfakeDetector;
 import com.example.test922.audio.detector.RawNet2Strategy;
 import com.example.test922.audio.processor.AudioExtractionListener;
 import com.example.test922.audio.processor.AudioExtractor;
-import com.example.test922.audio.processor.WavUtils;
-import com.example.test922.ui.adapter.BatchResultAdapter;
-import com.example.test922.ui.adapter.BatchResultItem;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -69,18 +64,15 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
     private Button startDetectionButton;
     private Button playAudioButton;
     private Button audioInfoButton;
-    private Button batchSelectButton;
+
+    private Button batchFolderButton;
+    private final List<File> convertedBatchFiles = new ArrayList<>();
+    private final List<String> originalBatchNames = new ArrayList<>(); // 对应每个批量文件的原始文件名
     private Button recordDetectionButton;
     private TextView statusTextView;
     private ProgressBar progressBar;
     private FrameLayout waveformContainer;
     private TextView recordingHint;
-
-    // 批量检测相关
-    private TextView batchResultTitle;
-    private RecyclerView batchResultRecycler;
-    private BatchResultAdapter batchResultAdapter;
-    private List<BatchResultItem> batchItems = new ArrayList<>();
 
     // 录音相关
     private AudioRecord audioRecord;
@@ -147,12 +139,16 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
                 }
             });
 
-    // 批量选择音频回调
-    private final ActivityResultLauncher<Intent> batchSelectLauncher = registerForActivityResult(
+
+// 批量选择文件夹回调
+    private final ActivityResultLauncher<Intent> batchFolderLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
                 if (result.getResultCode() == RESULT_OK && result.getData() != null) {
-                    handleBatchSelection(result.getData());
+                    Uri treeUri = result.getData().getData();
+                    if (treeUri != null) {
+                        handleBatchFolderSelection(treeUri);
+                    }
                 }
             });
 
@@ -168,19 +164,12 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
         startDetectionButton = findViewById(R.id.btn_start_detection);
         playAudioButton = findViewById(R.id.play_audio_button);
         audioInfoButton = findViewById(R.id.audio_info_button);
-        batchSelectButton = findViewById(R.id.btn_batch_select);
+        batchFolderButton = findViewById(R.id.btn_batch_folder);
         recordDetectionButton = findViewById(R.id.btn_record_detection);
         statusTextView = findViewById(R.id.status_text_view);
         progressBar = findViewById(R.id.progress_bar);
         waveformContainer = findViewById(R.id.waveform_container);
         recordingHint = findViewById(R.id.recording_hint);
-
-        // 批量检测视图
-        batchResultTitle = findViewById(R.id.batch_result_title);
-        batchResultRecycler = findViewById(R.id.batch_result_recycler);
-        batchResultAdapter = new BatchResultAdapter();
-        batchResultRecycler.setLayoutManager(new LinearLayoutManager(this));
-        batchResultRecycler.setAdapter(batchResultAdapter);
 
         // 初始状态
         updateButtonStates();
@@ -202,12 +191,13 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
             selectAudioLauncher.launch(intent);
         });
 
-        // 批量选取音频
-        batchSelectButton.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-            intent.setType("audio/*");
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            batchSelectLauncher.launch(Intent.createChooser(intent, "选择多个音频文件"));
+// 批量选取：选择文件夹
+        batchFolderButton.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+            batchFolderLauncher.launch(intent);
         });
 
         // 实时录音检测
@@ -521,125 +511,131 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
     }
 
     /**
-     * 处理批量选择结果
+     * 处理批量文件夹选择
      */
-    private void handleBatchSelection(Intent data) {
-        batchItems.clear();
-        List<Uri> uris = new ArrayList<>();
-
-        // 检查是否多选
-        ClipData clipData = data.getClipData();
-        if (clipData != null) {
-            for (int i = 0; i < clipData.getItemCount(); i++) {
-                uris.add(clipData.getItemAt(i).getUri());
-            }
-        } else if (data.getData() != null) {
-            uris.add(data.getData());
-        }
-
-        if (uris.isEmpty()) {
-            Toast.makeText(this, "未选择任何文件", Toast.LENGTH_SHORT).show();
-            return;
-        }
+    private void handleBatchFolderSelection(Uri treeUri) {
+        try {
+            getContentResolver().takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+            );
+        } catch (Exception ignored) {}
 
         currentInputType = InputType.BATCH;
-        statusTextView.setText("已选择 " + uris.size() + " 个音频文件，正在准备...");
+        statusTextView.setText("已选择文件夹，正在扫描音频文件...");
         showProgress(true);
-        batchResultTitle.setVisibility(View.VISIBLE);
-        batchResultRecycler.setVisibility(View.VISIBLE);
 
-        // 复制文件到本地并准备批量检测
-        executor.execute(() -> prepareBatchFiles(uris));
+        executor.execute(() -> prepareBatchFilesFromFolder(treeUri));
     }
-
     /**
-     * 准备批量文件（复制并转换为 16kHz 单声道 WAV）
+     * 遍历选中文件夹，收集并转换其中的音频文件
      */
-    private void prepareBatchFiles(List<Uri> uris) {
-        List<BatchResultItem> items = new ArrayList<>();
+    private void prepareBatchFilesFromFolder(Uri treeUri) {
+        convertedBatchFiles.clear();
+        originalBatchNames.clear();
 
-        int totalFiles = uris.size();
-        int processedFiles = 0;
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                treeUri,
+                DocumentsContract.getTreeDocumentId(treeUri)
+        );
 
-        for (Uri uri : uris) {
-            processedFiles++;
-            final int currentIndex = processedFiles;
+        try (Cursor cursor = getContentResolver().query(
+                childrenUri,
+                new String[]{
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE
+                },
+                null, null, null
+        )) {
+            if (cursor != null) {
+                int idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID);
+                int nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME);
+                int mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE);
 
-            String fileName = getFileName(uri);
-            if (!isSupportedAudioFormat(fileName)) {
-                Log.w(TAG, "跳过不支持的格式: " + fileName);
-                continue;
-            }
+                while (cursor.moveToNext()) {
+                    String docId = cursor.getString(idIndex);
+                    String name = cursor.getString(nameIndex);
+                    String mime = cursor.getString(mimeIndex);
 
-            runOnUiThread(() -> statusTextView.setText(
-                    String.format(Locale.US, "正在处理音频 %d/%d...\n%s", currentIndex, totalFiles, fileName)));
+                    // 跳过子目录
+                    if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                        continue;
+                    }
 
-            try {
-                String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date());
-                String extension = getFileExtension(fileName);
+                    if (!isSupportedAudioFormat(name)) {
+                        continue;
+                    }
 
-                // 先复制到临时文件
-                String tempFileName = "batch_temp_" + timestamp + extension;
-                File tempFile = new File(getExternalFilesDir(null), tempFileName);
+                    Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
 
-                try (InputStream is = getContentResolver().openInputStream(uri);
-                     FileOutputStream fos = new FileOutputStream(tempFile)) {
-                    if (is != null) {
-                        byte[] buffer = new byte[8192];
-                        int bytesRead;
-                        while ((bytesRead = is.read(buffer)) != -1) {
-                            fos.write(buffer, 0, bytesRead);
+                    runOnUiThread(() -> statusTextView.setText("正在处理: " + name));
+
+                    try {
+                        String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+                                .format(new Date());
+                        String extension = getFileExtension(name);
+                        File tempFile = new File(
+                                getExternalFilesDir(null),
+                                "batch_temp_" + timestamp + extension
+                        );
+
+                        try (InputStream is = getContentResolver().openInputStream(fileUri);
+                             FileOutputStream fos = new FileOutputStream(tempFile)) {
+                            if (is != null) {
+                                byte[] buffer = new byte[8192];
+                                int bytesRead;
+                                while ((bytesRead = is.read(buffer)) != -1) {
+                                    fos.write(buffer, 0, bytesRead);
+                                }
+                            }
                         }
+
+                        File convertedFile = new File(
+                                getExternalFilesDir(null),
+                                "batch_converted_" + timestamp + ".wav"
+                        );
+
+                        boolean converted = convertToModelFormat(tempFile, convertedFile);
+                        if (tempFile.exists()) {
+                            //noinspection ResultOfMethodCallIgnored
+                            tempFile.delete();
+                        }
+
+                        if (converted && convertedFile.exists() && convertedFile.length() > 44) {
+                            convertedBatchFiles.add(convertedFile);
+                            originalBatchNames.add(name); // 记录原始文件名
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "批量处理单个文件失败: " + name, e);
                     }
                 }
-
-                // 转换为 16kHz 单声道 WAV
-                String convertedFileName = "batch_converted_" + timestamp + ".wav";
-                File convertedFile = new File(getExternalFilesDir(null), convertedFileName);
-
-                boolean converted = convertToModelFormat(tempFile, convertedFile);
-
-                // 删除临时文件
-                if (tempFile.exists()) {
-                    //noinspection ResultOfMethodCallIgnored
-                    tempFile.delete();
-                }
-
-                if (converted && convertedFile.exists() && convertedFile.length() > 44) {
-                    items.add(new BatchResultItem(fileName, convertedFile.getAbsolutePath()));
-                    Log.d(TAG, "批量文件转换成功: " + fileName);
-                } else {
-                    Log.e(TAG, "批量文件转换失败: " + fileName);
-                }
-
-            } catch (Exception e) {
-                Log.e(TAG, "处理文件失败: " + fileName, e);
             }
+        } catch (Exception e) {
+            Log.e(TAG, "扫描文件夹失败", e);
         }
-
-        batchItems = items;
 
         runOnUiThread(() -> {
             showProgress(false);
-            batchResultAdapter.setItems(batchItems);
-            statusTextView.setText(String.format(Locale.US,
-                    "已准备 %d 个文件\n✅ 已转换为 16kHz 单声道 WAV\n\n开始检测...",
-                    batchItems.size()));
-            updateButtonStates();
+            if (convertedBatchFiles.isEmpty()) {
+                statusTextView.setText("选中的文件夹中没有可用的音频文件");
+            } else {
+                statusTextView.setText("已准备 " + convertedBatchFiles.size()
+                        + " 个文件，开始批量检测...");
+                startBatchDetection();
+            }
         });
-
-        // 自动开始批量检测
-        if (!batchItems.isEmpty() && isModelLoaded) {
-            runOnUiThread(this::startBatchDetection);
-        }
     }
-
     /**
-     * 开始批量检测
+     * 执行批量检测，对文件夹中准备好的所有音频进行检测
      */
     private void startBatchDetection() {
         if (!isModelLoaded || deepfakeDetector == null) {
             Toast.makeText(this, "模型未加载", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (convertedBatchFiles.isEmpty()) {
+            Toast.makeText(this, "没有待检测的文件", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -647,24 +643,35 @@ public class MainActivity extends AppCompatActivity implements AudioExtractionLi
         statusTextView.setText("批量检测进行中...");
 
         executor.execute(() -> {
-            for (int i = 0; i < batchItems.size(); i++) {
-                final int index = i;
-                BatchResultItem item = batchItems.get(i);
+            StringBuilder sb = new StringBuilder();
+            sb.append("批量检测结果:\n\n");
 
-                float realProbability = deepfakeDetector.detect(item.getFilePath());
+            for (int i = 0; i < convertedBatchFiles.size(); i++) {
+                File audioFile = convertedBatchFiles.get(i);
+                String displayName = (i < originalBatchNames.size())
+                        ? originalBatchNames.get(i)
+                        : audioFile.getName(); // 兜底
+
+                float realProbability = deepfakeDetector.detect(audioFile.getAbsolutePath());
 
                 if (realProbability >= 0) {
-                    item.setRealProbability(realProbability);
+                    float realPercent = realProbability * 100;
+                    float fakePercent = (1 - realProbability) * 100;
+                    String conclusion = realProbability > 0.5f ? "真实" : "伪造";
+                    float confidence = realProbability > 0.5f ? realPercent : fakePercent;
+                    sb.append(String.format(Locale.US,
+                            "%d. %s -> %s, 置信度 %.1f%% (Real: %.1f%% / Fake: %.1f%%)\n",
+                            i + 1, displayName, conclusion, confidence, realPercent, fakePercent));
                 } else {
-                    item.setFailed();
+                    sb.append(String.format(Locale.US,
+                            "%d. %s -> 检测失败\n", i + 1, displayName));
                 }
-
-                runOnUiThread(() -> batchResultAdapter.updateItem(index));
             }
 
+            String resultText = sb.toString();
             runOnUiThread(() -> {
                 showProgress(false);
-                statusTextView.setText("批量检测完成！共 " + batchItems.size() + " 个文件");
+                statusTextView.setText(resultText);
             });
         });
     }
